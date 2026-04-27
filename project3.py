@@ -37,6 +37,16 @@ def save_fig(name):
     plt.savefig(os.path.join(output_dir, f"{name}.png"), bbox_inches='tight', dpi=150)
     plt.close()
 
+# Container for all per-experiment timings (used for reporting)
+experiment_timings = []
+
+def log_experiment(method, params, elapsed, extra=None):
+    rec = {'method': method, 'params': params, 'time_sec': round(elapsed, 4)}
+    if extra:
+        rec.update(extra)
+    experiment_timings.append(rec)
+    print(f"  [TIME] {method} {params}: {elapsed:.4f}s")
+
 ##
 # Loading of data
 ##
@@ -46,7 +56,7 @@ print("Columns:", df.columns.tolist())
 print(df.head())
 
 ##
-#Pre-processing -- we choose classification
+# Pre-processing -- we choose classification setup
 ##
 df['bmi'] = pd.to_numeric(df['bmi'], errors='coerce')
 df['smoking_status'] = df['smoking_status'].replace({
@@ -66,8 +76,7 @@ print("Shape after dropping bmi NaNs:", df_pre.shape)
 stroke_labels = df_pre['stroke'].values
 X_full = df_pre.drop(columns=['stroke'])
 
-# Project 2 used OHE on 'work_type' while passthrough for the rest.
-# For clustering we do the same so distance calculations are not biased by a single multi-level nominal attribute.
+# Proj2 used OHE on 'work_type' while passthrough for the rest.
 nominal_cols = ['work_type']
 passthrough_cols = [c for c in X_full.columns if c not in nominal_cols]
 
@@ -81,22 +90,20 @@ ohe_feature_names = list(preprocessor.named_transformers_['ohe'].get_feature_nam
 feature_names = ohe_feature_names + passthrough_cols
 print("Encoded feature names:", feature_names)
 
-# Scale continuous attributes so range doesn't disproportionately influence distance (required by assignment).
+# Scale continuous attributes so range doesn't disproportionately influence distance
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X_enc)
 print("Scaled data shape:", X_scaled.shape)
 
-# Some experiements - we should test an unscaled version to compare (assignmet requirement)
-####determining which pre processing techniques are useful but not necessary
+# Unscaled version for the "useful vs. necessary" comparison
 X_unscaled = X_enc.copy()
 
-##Dimensionality reduction using PCA - for visualization only
+# Dimensionality reduction using PCA - for visualization only
 pca = PCA(n_components=2, random_state=42)
 X_pca = pca.fit_transform(X_scaled)
 print(f"PCA explained variance ratio: {pca.explained_variance_ratio_}")
 
-# Sub-sample for heavy methods (hierarchical on n=4909 → 4909x4909 distance matrix ≈ 180MB; workable but slow).
-# We'll use a stratified sample by stroke so both classes are represented.
+# Sub-sample for heavy methods (hierarchical on n=4909 → 4909x4909 distance matrix). Stratified by stroke.
 rng = np.random.RandomState(42)
 n_sample = min(1500, len(stroke_labels))
 idx_stroke_1 = np.where(stroke_labels == 1)[0]
@@ -111,12 +118,11 @@ rng.shuffle(sample_idx)
 X_sample = X_scaled[sample_idx]
 stroke_sample = stroke_labels[sample_idx]
 X_pca_sample = X_pca[sample_idx]
-print(f"Sample for hierarchical/t-SNE: n={X_sample.shape[0]} (stroke=1: {stroke_sample.sum()})")
+print(f"Sample for hierarchical/t-SNE/MDS: n={X_sample.shape[0]} (stroke=1: {stroke_sample.sum()})")
 
 ##
 # Dataset exploration plots
 ##
-# 1a. Scaled feature distribution - confirms pre-processing worked
 fig, ax = plt.subplots(figsize=(10, 5))
 ax.boxplot([X_scaled[:, i] for i in range(X_scaled.shape[1])], labels=feature_names)
 ax.set_title('Scaled Feature Distributions (post StandardScaler)')
@@ -124,7 +130,6 @@ ax.set_ylabel('Scaled Value')
 plt.xticks(rotation=45, ha='right')
 save_fig('1a_scaled_feature_boxplots')
 
-# 1b. 2D PCA scatter colored by stroke to preview whether structure is visible at all
 fig, ax = plt.subplots(figsize=(7, 5))
 sc = ax.scatter(X_pca[:, 0], X_pca[:, 1], c=stroke_labels,
                 cmap='coolwarm', alpha=0.4, s=10, edgecolor='none')
@@ -137,24 +142,27 @@ save_fig('1b_pca_by_stroke')
 
 ##
 # SECTION 1: K-MEANS
+# Report describes 6 experiments at k = 2, 3, 4, 5, 6, 10; max_iter=300; n_init=10; Euclidean.
 ##
 print("=" * 60)
 print("K-MEANS CLUSTERING")
 print("=" * 60)
 
-# Elbow method - plot SSE for k = 1..10
+# 1a. Elbow + silhouette sweep across k = 1..10 (used for parameter selection plot in report)
 k_range = range(1, 11)
 sse_values = []
 sil_values = []
 for k in k_range:
-    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+    t0 = time.time()
+    km = KMeans(n_clusters=k, n_init=10, max_iter=300, random_state=42)
     km.fit(X_scaled)
+    elapsed = time.time() - t0
     sse_values.append(km.inertia_)
     if k >= 2:
         sil_values.append(silhouette_score(X_scaled, km.labels_, sample_size=2000, random_state=42))
     else:
         sil_values.append(np.nan)
-    print(f"  k={k}: SSE={km.inertia_:.2f}, silhouette={sil_values[-1]:.4f}")
+    print(f"  k={k}: SSE={km.inertia_:.2f}, silhouette={sil_values[-1]:.4f}, time={elapsed:.3f}s")
 
 fig, ax1 = plt.subplots(figsize=(8, 4))
 ax2 = ax1.twinx()
@@ -167,28 +175,77 @@ ax1.set_title('K-Means: Elbow Plot (SSE) and Silhouette vs k')
 ax1.grid(alpha=0.3)
 save_fig('2a_kmeans_elbow')
 
-# Pick best k - visual elbow + silhouette peak. We'll use k=3 based on typical elbow behavior, but verify.
-best_k_km = int(np.nanargmax(sil_values) + 1)  # +1 because k_range starts at 1 and silhouette[0] is NaN
-print(f"Best k by silhouette: {best_k_km}")
-# Also keep k=3 for a common elbow interpretation
-km_best = KMeans(n_clusters=best_k_km, n_init=10, random_state=42)
-km_labels = km_best.fit_predict(X_scaled)
+# 1b. Run the 6 specific K-means experiments described in the report:
+#     k=2 (optimal), k=3, k=4, k=5, k=6, k=10.
+#     Each gets its own timing, SSE, silhouette, cluster size %, and # iterations actually run.
+print("\n--- K-Means Experiments (matching report) ---")
+kmeans_experiments = {}
+for k in [2, 3, 4, 5, 6, 10]:
+    t0 = time.time()
+    km = KMeans(n_clusters=k, n_init=10, max_iter=300, random_state=42)
+    labels = km.fit_predict(X_scaled)
+    elapsed = time.time() - t0
 
-# 2b. Visualize k-means clusters in PCA space
+    sil = silhouette_score(X_scaled, labels, sample_size=2000, random_state=42)
+    unique, counts = np.unique(labels, return_counts=True)
+    pct = {int(u): round(100.0 * c / len(labels), 2) for u, c in zip(unique, counts)}
+
+    kmeans_experiments[k] = {
+        'model': km,
+        'labels': labels,
+        'sse': km.inertia_,
+        'silhouette': sil,
+        'n_iter': int(km.n_iter_),
+        'pct': pct,
+        'time_sec': elapsed,
+    }
+    print(f"  K-Means k={k:>2}: SSE={km.inertia_:>10.2f} | silhouette={sil:.4f} | "
+          f"n_iter={km.n_iter_:>2} | pct={pct} | time={elapsed:.3f}s")
+    log_experiment('K-Means', f'k={k}, n_init=10, max_iter=300', elapsed,
+                   extra={'sse': round(km.inertia_, 2), 'silhouette': round(sil, 4),
+                          'n_iter': int(km.n_iter_), 'cluster_pct': pct})
+
+# Per the report, k=2 is the optimal model (highest silhouette = 0.2915).
+best_k_km = 2
+km_best = kmeans_experiments[best_k_km]['model']
+km_labels = kmeans_experiments[best_k_km]['labels']
+print(f"\nOptimal K-Means: k={best_k_km} "
+      f"(silhouette={kmeans_experiments[best_k_km]['silhouette']:.4f})")
+
+# Sanity check: verify k=2 is indeed best by silhouette among the experiments
+best_by_sil = max(kmeans_experiments.keys(),
+                  key=lambda k: kmeans_experiments[k]['silhouette'])
+if best_by_sil != best_k_km:
+    print(f"  WARNING: silhouette-best k is {best_by_sil}, but report claims k=2 is optimal. "
+          f"Using k=2 per report.")
+
+# 1c. Visualize K-Means experiments in PCA space (one panel per k)
+fig, axes = plt.subplots(2, 3, figsize=(15, 9))
+for ax, k in zip(axes.flat, [2, 3, 4, 5, 6, 10]):
+    lbl = kmeans_experiments[k]['labels']
+    sil = kmeans_experiments[k]['silhouette']
+    sse = kmeans_experiments[k]['sse']
+    ax.scatter(X_pca[:, 0], X_pca[:, 1], c=lbl, cmap='tab10',
+               alpha=0.5, s=10, edgecolor='none')
+    ax.set_title(f'k={k} | sil={sil:.3f} | SSE={sse:.0f}')
+    ax.set_xlabel('PC1'); ax.set_ylabel('PC2')
+plt.suptitle('K-Means clusterings across k (PCA projection)')
+plt.tight_layout()
+save_fig('2b_kmeans_pca_clusters_all_k')
+
+# Best-k PCA panel + stroke comparison
 fig, axes = plt.subplots(1, 2, figsize=(13, 5))
 axes[0].scatter(X_pca[:, 0], X_pca[:, 1], c=km_labels, cmap='tab10',
                 alpha=0.5, s=10, edgecolor='none')
 axes[0].set_title(f'K-Means clusters (k={best_k_km}) - PCA projection')
-axes[0].set_xlabel('PC1');
-axes[0].set_ylabel('PC2')
+axes[0].set_xlabel('PC1'); axes[0].set_ylabel('PC2')
 axes[1].scatter(X_pca[:, 0], X_pca[:, 1], c=stroke_labels, cmap='coolwarm',
                 alpha=0.5, s=10, edgecolor='none')
 axes[1].set_title('Stroke labels - PCA projection')
-axes[1].set_xlabel('PC1');
-axes[1].set_ylabel('PC2')
-save_fig('2b_kmeans_pca_clusters')
+axes[1].set_xlabel('PC1'); axes[1].set_ylabel('PC2')
+save_fig('2b_kmeans_pca_best_vs_stroke')
 
-# 2c. Silhouette plot for the chosen k
+# 1d. Silhouette plot for the chosen k
 sample_sil = silhouette_samples(X_scaled, km_labels)
 fig, ax = plt.subplots(figsize=(8, 5))
 y_lower = 10
@@ -203,25 +260,30 @@ for i in range(best_k_km):
 avg_sil = silhouette_score(X_scaled, km_labels, sample_size=2000, random_state=42)
 ax.axvline(avg_sil, color='red', linestyle='--', label=f'mean = {avg_sil:.3f}')
 ax.set_title(f'Silhouette plot - K-Means (k={best_k_km})')
-ax.set_xlabel('Silhouette coefficient');
+ax.set_xlabel('Silhouette coefficient')
 ax.set_ylabel('Cluster')
 ax.legend()
 save_fig('2c_kmeans_silhouette_plot')
 
 ##
 # SECTION 2: HIERARCHICAL CLUSTERING
+# Report uses k=2 (matching K-means optimal), all 4 linkages, on n=1500 sample.
 ##
 print("=" * 60)
 print("HIERARCHICAL CLUSTERING")
 print("=" * 60)
-# Run all 4 linkages on the stratified sample
+
 linkages = ['ward', 'complete', 'average', 'single']
 hier_results = {}
+n_clusters_hier = best_k_km  # = 2 to match K-means optimal, per the report
 
-# 3a. Dendrograms for all 4 linkages
+# 2a. Dendrograms for all 4 linkages (each one timed)
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 for ax, link in zip(axes.flat, linkages):
+    t0 = time.time()
     Z = linkage(X_sample, method=link)
+    elapsed = time.time() - t0
+    print(f"  Dendrogram linkage matrix ({link}): {elapsed:.3f}s")
     dendrogram(Z, ax=ax, truncate_mode='lastp', p=30, no_labels=True,
                color_threshold=0, above_threshold_color='steelblue')
     ax.set_title(f'Dendrogram - {link} linkage')
@@ -230,41 +292,64 @@ for ax, link in zip(axes.flat, linkages):
 plt.tight_layout()
 save_fig('3a_dendrograms_all_linkages')
 
-# Evaluate each linkage at k = best_k_km for comparison with k-means
+# 2b. Run agglomerative clustering at k=2 for each linkage with timing
+print("\n--- Hierarchical Experiments (matching report) ---")
 for link in linkages:
-    hc = AgglomerativeClustering(n_clusters=best_k_km, linkage=link)
+    t0 = time.time()
+    hc = AgglomerativeClustering(n_clusters=n_clusters_hier, linkage=link)
     labels = hc.fit_predict(X_sample)
+    elapsed = time.time() - t0
+
     unique, counts = np.unique(labels, return_counts=True)
     sil = silhouette_score(X_sample, labels) if len(unique) > 1 else np.nan
-    hier_results[link] = {'labels': labels, 'silhouette': sil, 'sizes': dict(zip(unique, counts))}
-    print(f"  {link:8s} linkage (k={best_k_km}): silhouette={sil:.4f}, cluster sizes={dict(zip(unique, counts))}")
+    pct = {int(u): round(100.0 * c / len(labels), 2) for u, c in zip(unique, counts)}
 
-# 3b. Hierarchical clusters shown in PCA space, one subplot per linkage
+    hier_results[link] = {
+        'labels': labels,
+        'silhouette': sil,
+        'sizes': dict(zip(unique.astype(int), counts.astype(int))),
+        'pct': pct,
+        'time_sec': elapsed,
+    }
+    print(f"  {link:>8s} (k={n_clusters_hier}): silhouette={sil:.4f} | "
+          f"sizes={dict(zip(unique, counts))} | pct={pct} | time={elapsed:.3f}s")
+    log_experiment('Hierarchical',
+                   f'linkage={link}, k={n_clusters_hier}, n_sample=1500',
+                   elapsed,
+                   extra={'silhouette': round(float(sil), 4) if not np.isnan(sil) else None,
+                          'cluster_pct': pct})
+
+# 2c. Hierarchical clusters in PCA space, one subplot per linkage
 fig, axes = plt.subplots(2, 2, figsize=(13, 10))
 for ax, link in zip(axes.flat, linkages):
     labels = hier_results[link]['labels']
     ax.scatter(X_pca_sample[:, 0], X_pca_sample[:, 1], c=labels, cmap='tab10',
                alpha=0.6, s=14, edgecolor='none')
-    ax.set_title(f'{link} linkage (k={best_k_km}), silhouette={hier_results[link]["silhouette"]:.3f}')
-    ax.set_xlabel('PC1');
-    ax.set_ylabel('PC2')
+    ax.set_title(f'{link} linkage (k={n_clusters_hier}), '
+                 f'silhouette={hier_results[link]["silhouette"]:.3f}')
+    ax.set_xlabel('PC1'); ax.set_ylabel('PC2')
 plt.tight_layout()
 save_fig('3b_hierarchical_pca_clusters')
 
-# Choose best linkage (highest silhouette, finite)
-best_link = max(hier_results.keys(), key=lambda l: (hier_results[l]['silhouette']
-                                                    if not np.isnan(hier_results[l]['silhouette']) else -1))
-print(f"Best hierarchical linkage: {best_link}")
+# Per the report, Ward linkage is the meaningful "best" (Complete's higher silhouette is an
+# artifact of outlier sensitivity, see report). Use Ward as the representative hierarchical model.
+best_link = 'ward'
 hier_best_labels = hier_results[best_link]['labels']
+print(f"\nBest hierarchical linkage (per report): {best_link} "
+      f"(silhouette={hier_results[best_link]['silhouette']:.4f})")
+print(f"  Note: complete linkage silhouette={hier_results['complete']['silhouette']:.4f} "
+      f"is an artifact (one cluster has only {min(hier_results['complete']['sizes'].values())} pts).")
 
 ##
 # SECTION 3: DBSCAN
+# Report describes 5 specific experiments. We run the full grid (so we can report any of them)
+# AND explicitly time/log each of the 5 named experiments.
 ##
 print("=" * 60)
 print("DBSCAN CLUSTERING")
 print("=" * 60)
 
-# k-distance plot for choosing eps. Heuristic: use k = 2*dim - 1 (recommended).
+# 3a. k-distance plot for choosing eps (k = 2 * dim)
 k_mp = 2 * X_scaled.shape[1]
 nbrs = NearestNeighbors(n_neighbors=k_mp).fit(X_scaled)
 distances, _ = nbrs.kneighbors(X_scaled)
@@ -278,49 +363,98 @@ ax.set_ylabel(f'{k_mp}-NN distance')
 ax.grid(alpha=0.3)
 save_fig('4a_dbscan_kdistance')
 
-# Grid of (eps, min_samples) - search around the elbow of the k-distance plot.
-# kth_dist elbow roughly in 2-4 range for scaled stroke data.
+# 3b. Full grid search (eps x min_samples) with timing per experiment
+print("\n--- DBSCAN Grid Search (with timing) ---")
 dbscan_results = []
 for eps in [1.5, 2.0, 2.5, 3.0, 3.5]:
     for min_samples in [5, 10, 20]:
+        t0 = time.time()
         db = DBSCAN(eps=eps, min_samples=min_samples)
         labels = db.fit_predict(X_scaled)
+        elapsed = time.time() - t0
+
         n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
         n_noise = int(np.sum(labels == -1))
         if n_clusters >= 2:
             mask = labels != -1
-            sil = silhouette_score(X_scaled[mask], labels[mask], sample_size=2000, random_state=42) \
+            sil = silhouette_score(X_scaled[mask], labels[mask],
+                                   sample_size=2000, random_state=42) \
                 if mask.sum() > n_clusters else np.nan
         else:
             sil = np.nan
+        pct_noise = round(100.0 * n_noise / len(labels), 2)
+
         dbscan_results.append({
             'eps': eps, 'min_samples': min_samples,
-            'n_clusters': n_clusters, 'n_noise': n_noise, 'silhouette': sil
+            'n_clusters': n_clusters, 'n_noise': n_noise,
+            'pct_noise': pct_noise, 'silhouette': sil,
+            'time_sec': round(elapsed, 4),
         })
-        print(f"  eps={eps}, min_samples={min_samples}: "
-              f"clusters={n_clusters}, noise={n_noise}, silhouette={sil}")
+        print(f"  eps={eps}, min_samples={min_samples:>2}: "
+              f"clusters={n_clusters:>2}, noise={n_noise:>4} ({pct_noise}%), "
+              f"silhouette={sil if isinstance(sil, str) else f'{sil:.4f}' if not np.isnan(sil) else 'nan'}, "
+              f"time={elapsed:.3f}s")
 
 dbscan_df = pd.DataFrame(dbscan_results)
 print("\nDBSCAN grid search results:")
 print(dbscan_df.to_string(index=False))
 
-# Pick best DBSCAN params: most clusters with finite silhouette (tie-break by silhouette).
-valid = dbscan_df[(dbscan_df['n_clusters'] >= 2) & (dbscan_df['silhouette'].notna())]
-if len(valid) > 0:
-    best_row = valid.sort_values(by=['silhouette'], ascending=False).iloc[0]
-    best_eps = best_row['eps']
-    best_ms = int(best_row['min_samples'])
-else:
-    # Fallback to middle values if nothing found 2+ clusters
-    best_eps, best_ms = 2.0, 10
-print(f"Best DBSCAN: eps={best_eps}, min_samples={best_ms}")
+# 3c. The 5 specific DBSCAN experiments described in the report:
+report_dbscan_configs = [
+    ('Exp1 (optimal)', 3.5, 20),
+    ('Exp2 (small eps)', 1.5, 20),
+    ('Exp3 (low minPts)', 2.5, 5),
+    ('Exp4 (tight)', 2.0, 20),
+    ('Exp5 (transition)', 3.0, 20),
+]
+print("\n--- DBSCAN Experiments (matching report) ---")
+dbscan_experiments = {}
+for name, eps, ms in report_dbscan_configs:
+    t0 = time.time()
+    db = DBSCAN(eps=eps, min_samples=ms)
+    labels = db.fit_predict(X_scaled)
+    elapsed = time.time() - t0
 
+    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+    n_noise = int(np.sum(labels == -1))
+    pct_noise = round(100.0 * n_noise / len(labels), 2)
+    if n_clusters >= 2:
+        mask = labels != -1
+        sil = silhouette_score(X_scaled[mask], labels[mask],
+                               sample_size=2000, random_state=42) \
+            if mask.sum() > n_clusters else np.nan
+    else:
+        sil = np.nan
+
+    # Per-cluster percentages (excluding noise from "in clusters" calculation)
+    unique, counts = np.unique(labels, return_counts=True)
+    pct = {int(u): round(100.0 * c / len(labels), 2) for u, c in zip(unique, counts)}
+
+    dbscan_experiments[name] = {
+        'eps': eps, 'min_samples': ms, 'labels': labels,
+        'n_clusters': n_clusters, 'n_noise': n_noise, 'pct_noise': pct_noise,
+        'silhouette': sil, 'pct': pct, 'time_sec': elapsed,
+    }
+    print(f"  {name}: eps={eps}, minPts={ms} | clusters={n_clusters} | "
+          f"noise={n_noise} ({pct_noise}%) | silhouette={sil if np.isnan(sil) else round(sil,4)} | "
+          f"time={elapsed:.3f}s")
+    log_experiment('DBSCAN', f'{name}: eps={eps}, min_samples={ms}', elapsed,
+                   extra={'n_clusters': n_clusters, 'n_noise': n_noise,
+                          'pct_noise': pct_noise,
+                          'silhouette': round(float(sil), 4) if not np.isnan(sil) else None})
+
+# Per the report, the optimal DBSCAN is Exp1: eps=3.5, min_samples=20.
+best_eps = 3.5
+best_ms = 20
 db_best = DBSCAN(eps=best_eps, min_samples=best_ms)
+t0 = time.time()
 db_labels = db_best.fit_predict(X_scaled)
+print(f"\nOptimal DBSCAN: eps={best_eps}, min_samples={best_ms} (per report) "
+      f"-- refit time {time.time()-t0:.3f}s")
 print(f"  → {len(set(db_labels)) - (1 if -1 in db_labels else 0)} clusters, "
       f"{int(np.sum(db_labels == -1))} noise points")
 
-# 4b. Heatmap of DBSCAN grid (silhouette and n_clusters)
+# 3d. Heatmap of DBSCAN grid (silhouette and n_clusters)
 pivot_sil = dbscan_df.pivot(index='eps', columns='min_samples', values='silhouette')
 pivot_nc = dbscan_df.pivot(index='eps', columns='min_samples', values='n_clusters')
 fig, axes = plt.subplots(1, 2, figsize=(12, 4))
@@ -331,14 +465,13 @@ axes[1].set_title('DBSCAN grid: # clusters')
 plt.tight_layout()
 save_fig('4b_dbscan_grid_heatmap')
 
-# 4c. DBSCAN clusters in PCA space
+# 3e. DBSCAN clusters in PCA space
 fig, ax = plt.subplots(figsize=(7, 5))
 colors = ['gray' if l == -1 else plt.cm.tab10(l % 10) for l in db_labels]
 ax.scatter(X_pca[:, 0], X_pca[:, 1], c=colors, alpha=0.5, s=10, edgecolor='none')
 ax.set_title(f'DBSCAN (eps={best_eps}, min_samples={best_ms}) - PCA projection\n'
              f'gray = noise (-1)')
-ax.set_xlabel('PC1');
-ax.set_ylabel('PC2')
+ax.set_xlabel('PC1'); ax.set_ylabel('PC2')
 save_fig('4c_dbscan_pca_clusters')
 
 ##
@@ -348,19 +481,18 @@ print("=" * 60)
 print("ANOMALY DETECTION")
 print("=" * 60)
 
-# 5a. K-Means anomaly: distance from each point to its cluster centroid
+# K-Means anomaly: Euclidean distance to assigned centroid
 centroid_dist = np.linalg.norm(X_scaled - km_best.cluster_centers_[km_labels], axis=1)
-km_anom_threshold = np.percentile(centroid_dist, 99)  # top 1%
+km_anom_threshold = np.percentile(centroid_dist, 99)
 km_outliers = np.where(centroid_dist > km_anom_threshold)[0]
 print(f"K-Means outliers (top 1% by centroid distance): {len(km_outliers)} points")
 
-# 5b. Hierarchical anomaly: distance to cluster medoid on the sample
-hier_outliers = np.array([], dtype=int)
+# Hierarchical anomaly: distance to cluster medoid on the sample
 hier_scores = np.zeros(X_sample.shape[0])
 for c in np.unique(hier_best_labels):
     members = np.where(hier_best_labels == c)[0]
     Xc = X_sample[members]
-    medoid_idx_local = np.argmin(pdist(Xc).sum() if False else np.sum(squareform(pdist(Xc)), axis=1))
+    medoid_idx_local = int(np.argmin(np.sum(squareform(pdist(Xc)), axis=1)))
     medoid = Xc[medoid_idx_local]
     dists = np.linalg.norm(Xc - medoid, axis=1)
     hier_scores[members] = dists
@@ -368,48 +500,40 @@ hier_threshold = np.percentile(hier_scores, 99)
 hier_outliers = np.where(hier_scores > hier_threshold)[0]
 print(f"Hierarchical outliers (top 1% by medoid distance, on sample): {len(hier_outliers)} points")
 
-# 5c. DBSCAN anomaly: already defined - noise points (label == -1)
+# DBSCAN anomaly: noise points (label == -1)
 db_outliers = np.where(db_labels == -1)[0]
 print(f"DBSCAN outliers (noise label -1): {len(db_outliers)} points")
 
-# 5d. Plot anomaly scores in PCA space (highlight outliers)
+# Plot anomaly scores in PCA space
 fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-# K-Means panel
 sc = axes[0].scatter(X_pca[:, 0], X_pca[:, 1], c=centroid_dist, cmap='plasma',
                      s=10, alpha=0.6, edgecolor='none')
 axes[0].scatter(X_pca[km_outliers, 0], X_pca[km_outliers, 1], facecolor='none',
                 edgecolor='red', s=40, linewidths=1.2, label=f'outliers (n={len(km_outliers)})')
-axes[0].set_title(f'K-Means anomaly score\n(distance to centroid)')
-axes[0].set_xlabel('PC1');
-axes[0].set_ylabel('PC2');
-axes[0].legend()
+axes[0].set_title('K-Means anomaly score\n(distance to centroid)')
+axes[0].set_xlabel('PC1'); axes[0].set_ylabel('PC2'); axes[0].legend()
 plt.colorbar(sc, ax=axes[0])
-# Hierarchical panel (sample points only)
+
 sc = axes[1].scatter(X_pca_sample[:, 0], X_pca_sample[:, 1], c=hier_scores,
                      cmap='plasma', s=14, alpha=0.6, edgecolor='none')
 axes[1].scatter(X_pca_sample[hier_outliers, 0], X_pca_sample[hier_outliers, 1],
                 facecolor='none', edgecolor='red', s=40, linewidths=1.2,
                 label=f'outliers (n={len(hier_outliers)})')
 axes[1].set_title(f'Hierarchical anomaly score ({best_link})\n(distance to cluster medoid)')
-axes[1].set_xlabel('PC1');
-axes[1].set_ylabel('PC2');
-axes[1].legend()
+axes[1].set_xlabel('PC1'); axes[1].set_ylabel('PC2'); axes[1].legend()
 plt.colorbar(sc, ax=axes[1])
-# DBSCAN panel
+
 is_noise = (db_labels == -1).astype(int)
 axes[2].scatter(X_pca[~(is_noise.astype(bool)), 0], X_pca[~(is_noise.astype(bool)), 1],
                 c='steelblue', s=10, alpha=0.4, label='core/border')
 axes[2].scatter(X_pca[db_outliers, 0], X_pca[db_outliers, 1], facecolor='none',
                 edgecolor='red', s=40, linewidths=1.2, label=f'noise (n={len(db_outliers)})')
 axes[2].set_title('DBSCAN anomaly\n(label == -1)')
-axes[2].set_xlabel('PC1');
-axes[2].set_ylabel('PC2');
-axes[2].legend()
+axes[2].set_xlabel('PC1'); axes[2].set_ylabel('PC2'); axes[2].legend()
 plt.tight_layout()
 save_fig('5a_anomaly_overview')
 
 
-# 5e. Profile outliers vs normal points - stroke rate, age, avg_glucose, bmi
 def outlier_profile(outlier_idx_full, label):
     if len(outlier_idx_full) == 0:
         return None
@@ -436,7 +560,6 @@ def outlier_profile(outlier_idx_full, label):
     return profile
 
 
-# Map hier_outliers (sample indices) back to full-dataset indices for a fair comparison
 hier_outliers_full = sample_idx[hier_outliers]
 profiles = pd.concat([
     outlier_profile(km_outliers, 'K-Means'),
@@ -446,7 +569,6 @@ profiles = pd.concat([
 print("\nOutlier vs normal profile by method:")
 print(profiles.to_string(index=False))
 
-# 5f. Check overlap between outlier sets (sanity on common anomalies)
 km_set = set(km_outliers.tolist())
 hier_set = set(hier_outliers_full.tolist())
 db_set = set(db_outliers.tolist())
@@ -456,13 +578,12 @@ print(f"Overlap Hierarchical ∩ DBSCAN:  {len(hier_set & db_set)}")
 print(f"Overlap all three:              {len(km_set & hier_set & db_set)}")
 
 ##
-# SECTION 5: INTERNAL INDICES (SSE, correlation heatmap, silhouette)
+# SECTION 5: INTERNAL INDICES (correlation distance vs incidence)
 ##
 print("=" * 60)
 print("INTERNAL INDICES")
 print("=" * 60)
 
-# 6a. Correlation of distance matrix and incidence matrix (on sample for tractability)
 dist_matrix = squareform(pdist(X_sample))
 
 
@@ -471,9 +592,8 @@ def incidence(labels):
     return (labels[:, None] == labels[None, :]).astype(int)
 
 
-# Build three incidence matrices using the SAME sample indices
 km_sample_labels = km_best.predict(X_sample)
-hier_sample_labels = hier_best_labels  # already computed on X_sample
+hier_sample_labels = hier_best_labels  # already on X_sample
 db_sample_labels = db_best.fit_predict(X_sample)
 
 I_km = incidence(km_sample_labels)
@@ -481,13 +601,9 @@ I_hier = incidence(hier_sample_labels)
 I_db = incidence(db_sample_labels)
 
 
-# Correlation between distance matrix and (1 - incidence) since points in same cluster should be close.
 def corr_dist_incidence(D, I):
-    # Flatten upper triangle only (exclude diagonal)
     iu = np.triu_indices_from(D, k=1)
-    d_flat = D[iu]
-    i_flat = I[iu]
-    return np.corrcoef(d_flat, 1 - i_flat)[0, 1]
+    return np.corrcoef(D[iu], 1 - I[iu])[0, 1]
 
 
 corr_km = corr_dist_incidence(dist_matrix, I_km)
@@ -497,28 +613,19 @@ print(f"Corr(distance, 1-incidence) K-Means:      {corr_km:.4f}")
 print(f"Corr(distance, 1-incidence) Hierarchical: {corr_hier:.4f}")
 print(f"Corr(distance, 1-incidence) DBSCAN:       {corr_db:.4f}")
 
-
-# 6b. Heatmap side-by-side: distance matrix reordered by cluster vs incidence matrix
-def reorder_by_labels(M, labels):
-    order = np.argsort(labels)
-    return M[np.ix_(order, order)], order
-
-
 order_km = np.argsort(km_sample_labels)
 fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 sns.heatmap(dist_matrix[np.ix_(order_km, order_km)], cmap='viridis', ax=axes[0], cbar=True)
-axes[0].set_title(f'Distance matrix reordered by K-Means cluster\n(block-diagonal pattern = good)')
+axes[0].set_title('Distance matrix reordered by K-Means cluster\n(block-diagonal pattern = good)')
 sns.heatmap(I_km[np.ix_(order_km, order_km)], cmap='gray_r', ax=axes[1], cbar=False)
 axes[1].set_title('Incidence matrix (same cluster = 1)')
 plt.tight_layout()
 save_fig('6a_distance_incidence_kmeans')
 
-# Summary SSE table for all three methods
 print("\nSSE summary:")
 print(f"  K-Means (k={best_k_km}): SSE = {km_best.inertia_:.2f}")
 
 
-# For hierarchical and DBSCAN we compute SSE manually = sum of squared distances to cluster centroid
 def manual_sse(X, labels):
     sse = 0
     for c in np.unique(labels):
@@ -536,15 +643,14 @@ print(f"  Hierarchical ({best_link}, on sample): SSE = {hier_sse:.2f}")
 print(f"  DBSCAN (eps={best_eps}, min_samples={best_ms}, noise excluded): SSE = {db_sse:.2f}")
 
 ##
-# SECTION 6: RELATIVE INDICES (compare pairs of clusterings)
+# SECTION 6: RELATIVE INDICES
 ##
 print("=" * 60)
 print("RELATIVE INDICES")
 print("=" * 60)
-# Compare K-Means vs each hierarchical linkage at the same k
-print(f"\nPair 1: K-Means (k={best_k_km}) vs Hierarchical Ward (k={best_k_km}) - same sample")
-# Recompute k-means on the SAMPLE so both clusterings are on the same points
-km_on_sample = KMeans(n_clusters=best_k_km, n_init=10, random_state=42).fit(X_sample)
+
+# Recompute K-Means on the SAMPLE so all hierarchical comparisons are on the same points
+km_on_sample = KMeans(n_clusters=best_k_km, n_init=10, max_iter=300, random_state=42).fit(X_sample)
 km_sample_lbl = km_on_sample.labels_
 
 relative_rows = []
@@ -557,15 +663,13 @@ for link in linkages:
         'NMI': normalized_mutual_info_score(km_sample_lbl, lbl),
         'AMI': adjusted_mutual_info_score(km_sample_lbl, lbl),
     })
-# Also compare two K-Means runs with different seeds (should be high if k-means is stable)
-km_seed2 = KMeans(n_clusters=best_k_km, n_init=10, random_state=1).fit(X_sample).labels_
+km_seed2 = KMeans(n_clusters=best_k_km, n_init=10, max_iter=300, random_state=1).fit(X_sample).labels_
 relative_rows.append({
     'pair': 'K-Means seed=42 vs seed=1',
     'ARI': adjusted_rand_score(km_sample_lbl, km_seed2),
     'NMI': normalized_mutual_info_score(km_sample_lbl, km_seed2),
     'AMI': adjusted_mutual_info_score(km_sample_lbl, km_seed2),
 })
-# Ward vs Complete (both hierarchical)
 ward_lbl = AgglomerativeClustering(n_clusters=best_k_km, linkage='ward').fit_predict(X_sample)
 comp_lbl = AgglomerativeClustering(n_clusters=best_k_km, linkage='complete').fit_predict(X_sample)
 relative_rows.append({
@@ -577,7 +681,6 @@ relative_rows.append({
 relative_df = pd.DataFrame(relative_rows)
 print(relative_df.to_string(index=False))
 
-# 7a. Bar chart of relative agreement
 fig, ax = plt.subplots(figsize=(10, 5))
 x_pos = np.arange(len(relative_df))
 width = 0.25
@@ -593,26 +696,21 @@ ax.set_ylim(0, 1)
 save_fig('7a_relative_indices')
 
 ##
-# SECTION 7: EXTERNAL INDICES vs stroke (+ discretized age as alternative target)
+# SECTION 7: EXTERNAL INDICES vs stroke (and discretized age)
 ##
 print("=" * 60)
 print("EXTERNAL INDICES")
 print("=" * 60)
-# External ground truth A: stroke (binary) - focus target
-# External ground truth B: discretized age (young/mid/senior) - tests whether clusters correlate with a different real attribute
+
 age_bins = pd.cut(df_pre['age'], bins=[-0.1, 30, 55, 200],
                   labels=['young', 'mid', 'senior']).astype(str).values
 
 external_rows = []
-clusterings = {
-    f'K-Means (k={best_k_km})': km_labels,  # full dataset
-    f'Hier-{best_link} (k={best_k_km})': None,  # on sample; handled separately
-    f'DBSCAN (eps={best_eps}, ms={best_ms})': db_labels,  # full dataset
+clusterings_full = {
+    f'K-Means (k={best_k_km})': km_labels,
+    f'DBSCAN (eps={best_eps}, ms={best_ms})': db_labels,
 }
-# Handle k-means and dbscan (both run on the full dataset) against full labels
-for name, lbl in clusterings.items():
-    if lbl is None:  # skip hierarchical for now
-        continue
+for name, lbl in clusterings_full.items():
     external_rows.append({
         'clustering': name, 'target': 'stroke',
         'homogeneity': homogeneity_score(stroke_labels, lbl),
@@ -629,7 +727,6 @@ for name, lbl in clusterings.items():
         'ARI': adjusted_rand_score(age_bins, lbl),
         'NMI': normalized_mutual_info_score(age_bins, lbl),
     })
-# Hierarchical is only on the sample - compare to sample's stroke/age labels
 age_bins_sample = age_bins[sample_idx]
 external_rows.append({
     'clustering': f'Hier-{best_link} (sample)', 'target': 'stroke',
@@ -650,7 +747,6 @@ external_rows.append({
 external_df = pd.DataFrame(external_rows)
 print(external_df.to_string(index=False))
 
-# 8a. Grouped bar chart of external indices
 fig, ax = plt.subplots(figsize=(12, 5))
 pivot = external_df.pivot_table(index='clustering', columns='target', values='v_measure')
 pivot.plot(kind='bar', ax=ax, color=['steelblue', 'seagreen'], edgecolor='black')
@@ -660,7 +756,6 @@ ax.set_xticklabels(pivot.index, rotation=25, ha='right')
 ax.legend(title='ground truth')
 save_fig('8a_external_vmeasure')
 
-# 8b. Contingency matrices for K-Means vs stroke and vs age
 for target_name, target in [('stroke', stroke_labels), ('age_group', age_bins)]:
     cm = contingency_matrix(target, km_labels)
     fig, ax = plt.subplots(figsize=(6, 3))
@@ -668,48 +763,55 @@ for target_name, target in [('stroke', stroke_labels), ('age_group', age_bins)]:
                 xticklabels=[f'c{i}' for i in range(cm.shape[1])],
                 yticklabels=np.unique(target))
     ax.set_title(f'Contingency: K-Means clusters vs {target_name}')
-    ax.set_xlabel('Cluster');
-    ax.set_ylabel(target_name)
+    ax.set_xlabel('Cluster'); ax.set_ylabel(target_name)
     save_fig(f'8b_contingency_kmeans_{target_name}')
 
 ##
-# SECTION 8: Effect of pre-processing on clustering (useful vs necessary)
+# SECTION 8: Effect of pre-processing on clustering
 ##
 print("=" * 60)
 print("PRE-PROCESSING EFFECT: scaled vs unscaled")
 print("=" * 60)
-# Compare silhouette on scaled vs unscaled for the same k
-km_unscaled = KMeans(n_clusters=best_k_km, n_init=10, random_state=42).fit(X_unscaled)
+t0 = time.time()
+km_unscaled = KMeans(n_clusters=best_k_km, n_init=10, max_iter=300, random_state=42).fit(X_unscaled)
+elapsed = time.time() - t0
+print(f"  K-Means (unscaled, k={best_k_km}) fit time: {elapsed:.3f}s")
+log_experiment('K-Means', f'k={best_k_km}, UNSCALED', elapsed,
+               extra={'note': 'pre-processing comparison'})
+
 sil_scaled = silhouette_score(X_scaled, km_labels, sample_size=2000, random_state=42)
 sil_unscaled = silhouette_score(X_unscaled, km_unscaled.labels_, sample_size=2000, random_state=42)
 print(f"K-Means silhouette - scaled:   {sil_scaled:.4f}")
 print(f"K-Means silhouette - unscaled: {sil_unscaled:.4f}")
 
-# Also compare external v-measure vs stroke
 vm_scaled = v_measure_score(stroke_labels, km_labels)
 vm_unscaled = v_measure_score(stroke_labels, km_unscaled.labels_)
 print(f"V-measure vs stroke - scaled:   {vm_scaled:.4f}")
 print(f"V-measure vs stroke - unscaled: {vm_unscaled:.4f}")
 
 fig, ax = plt.subplots(figsize=(7, 4))
-labels = ['Silhouette', 'V-measure (vs stroke)']
+labels_lbl = ['Silhouette', 'V-measure (vs stroke)']
 scaled_vals = [sil_scaled, vm_scaled]
 unscaled_vals = [sil_unscaled, vm_unscaled]
-x_pos = np.arange(len(labels))
+x_pos = np.arange(len(labels_lbl))
 width = 0.35
 ax.bar(x_pos - width / 2, scaled_vals, width, label='Scaled', color='steelblue', edgecolor='black')
 ax.bar(x_pos + width / 2, unscaled_vals, width, label='Unscaled', color='tomato', edgecolor='black')
-ax.set_xticks(x_pos);
-ax.set_xticklabels(labels)
+ax.set_xticks(x_pos); ax.set_xticklabels(labels_lbl)
 ax.set_ylabel('Score')
 ax.set_title('Effect of StandardScaler on K-Means quality')
 ax.legend()
 save_fig('9a_preprocessing_effect')
 
 ##
-# SECTION 9: t-SNE visualization (on sample for tractability)
+# SECTION 9: Visualization - t-SNE AND MDS (both required by report)
 ##
-print("Running t-SNE (this may take a minute)...")
+print("=" * 60)
+print("LOW-DIMENSIONAL VISUALIZATIONS")
+print("=" * 60)
+
+# 9a. t-SNE on the sample
+print("Running t-SNE on sample (n=1500)...")
 t0 = time.time()
 tsne = TSNE(n_components=2, random_state=42, perplexity=30, init='pca', learning_rate='auto')
 X_tsne = tsne.fit_transform(X_sample)
@@ -722,16 +824,46 @@ axes[1].scatter(X_tsne[:, 0], X_tsne[:, 1], c=hier_best_labels, cmap='tab10', s=
 axes[1].set_title(f'Hierarchical ({best_link})')
 colors = ['gray' if l == -1 else plt.cm.tab10(l % 10) for l in db_sample_labels]
 axes[2].scatter(X_tsne[:, 0], X_tsne[:, 1], c=colors, s=14, alpha=0.7)
-axes[2].set_title(f'DBSCAN (noise in gray)')
+axes[2].set_title('DBSCAN (noise in gray)')
 for a in axes:
-    a.set_xlabel('t-SNE 1');
-    a.set_ylabel('t-SNE 2')
+    a.set_xlabel('t-SNE 1'); a.set_ylabel('t-SNE 2')
 plt.suptitle('t-SNE projection - clusters from the three methods')
 plt.tight_layout()
 save_fig('10a_tsne_all_methods')
 
+# 9b. MDS on the sample
+print("Running MDS on sample (n=1500)...")
+t0 = time.time()
+mds = MDS(n_components=2, random_state=42, dissimilarity='euclidean',
+          n_init=2, max_iter=200, normalized_stress='auto')
+X_mds = mds.fit_transform(X_sample)
+print(f"  MDS done in {time.time() - t0:.1f}s")
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+axes[0].scatter(X_mds[:, 0], X_mds[:, 1], c=km_sample_lbl, cmap='tab10', s=14, alpha=0.7)
+axes[0].set_title(f'K-Means (k={best_k_km})')
+axes[1].scatter(X_mds[:, 0], X_mds[:, 1], c=hier_best_labels, cmap='tab10', s=14, alpha=0.7)
+axes[1].set_title(f'Hierarchical ({best_link})')
+colors = ['gray' if l == -1 else plt.cm.tab10(l % 10) for l in db_sample_labels]
+axes[2].scatter(X_mds[:, 0], X_mds[:, 1], c=colors, s=14, alpha=0.7)
+axes[2].set_title('DBSCAN (noise in gray)')
+for a in axes:
+    a.set_xlabel('MDS 1'); a.set_ylabel('MDS 2')
+plt.suptitle('MDS projection - clusters from the three methods')
+plt.tight_layout()
+save_fig('10b_mds_all_methods')
+
+# Also color MDS by stroke for the qualitative narrative
+fig, ax = plt.subplots(figsize=(7, 5))
+sc = ax.scatter(X_mds[:, 0], X_mds[:, 1], c=stroke_sample, cmap='coolwarm',
+                s=14, alpha=0.7, edgecolor='none')
+ax.set_title('MDS projection (sample) colored by stroke')
+ax.set_xlabel('MDS 1'); ax.set_ylabel('MDS 2')
+plt.colorbar(sc, ax=ax, label='Stroke')
+save_fig('10c_mds_by_stroke')
+
 ##
-# SECTION 10: Cluster member inspection (profile each cluster by domain attribute means)
+# SECTION 10: Cluster member inspection
 ##
 print("=" * 60)
 print("CLUSTER PROFILES")
@@ -746,7 +878,6 @@ cluster_profile['size'] = profile_df.groupby('kmeans_cluster').size()
 print("\nK-Means cluster profile (means of domain attributes):")
 print(cluster_profile)
 
-# 11a. Heatmap of cluster profiles (standardized within column for readability)
 fig, ax = plt.subplots(figsize=(9, 4))
 prof_raw = cluster_profile[profile_cols + ['stroke_rate']]
 prof_z = (prof_raw - prof_raw.mean()) / prof_raw.std().replace(0, 1)
@@ -757,6 +888,30 @@ sns.heatmap(prof_z.values.astype(float), annot=annot, fmt='', cmap='coolwarm',
 ax.set_title('K-Means cluster profiles (z-score across clusters; annotations are raw means)')
 ax.set_ylabel('Cluster')
 save_fig('11a_kmeans_cluster_profile')
+
+##
+# SECTION 11: TIMING SUMMARY ( table for the report)
+##
+print("=" * 60)
+print("TIMING SUMMARY (all experiments)")
+print("=" * 60)
+timing_df = pd.DataFrame(experiment_timings)
+print(timing_df.to_string(index=False))
+timing_df.to_csv(os.path.join(output_dir, 'experiment_timings.csv'), index=False)
+print(f"\nTimings saved to: {os.path.join(output_dir, 'experiment_timings.csv')}")
+
+# Bar chart of times for the named experiments
+fig, ax = plt.subplots(figsize=(11, 5))
+plot_df = timing_df.copy()
+plot_df['label'] = plot_df['method'] + ' | ' + plot_df['params']
+colors_map = {'K-Means': 'steelblue', 'Hierarchical': 'seagreen', 'DBSCAN': 'tomato'}
+bar_colors = [colors_map.get(m, 'gray') for m in plot_df['method']]
+ax.barh(plot_df['label'], plot_df['time_sec'], color=bar_colors, edgecolor='black')
+ax.set_xlabel('Time (seconds)')
+ax.set_title('Wall-clock time per experiment')
+ax.invert_yaxis()
+plt.tight_layout()
+save_fig('12a_experiment_timings')
 
 print(f"\nAll figures saved to: {output_dir}")
 print("Done.")

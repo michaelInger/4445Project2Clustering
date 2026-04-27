@@ -1,0 +1,17 @@
+method,params,time_sec,sse,silhouette,n_iter,cluster_pct,n_clusters,n_noise,pct_noise,note
+K-Means,"k=2, n_init=10, max_iter=300",0.2008,52142.04,0.2915,6.0,"{0: np.float64(85.74), 1: np.float64(14.26)}",,,,
+K-Means,"k=3, n_init=10, max_iter=300",0.1671,45305.11,0.2608,10.0,"{0: np.float64(69.89), 1: np.float64(15.85), 2: np.float64(14.26)}",,,,
+K-Means,"k=4, n_init=10, max_iter=300",0.1501,41198.04,0.2641,11.0,"{0: np.float64(14.89), 1: np.float64(56.14), 2: np.float64(14.14), 3: np.float64(14.83)}",,,,
+K-Means,"k=5, n_init=10, max_iter=300",0.1912,36189.52,0.271,15.0,"{0: np.float64(56.1), 1: np.float64(13.69), 2: np.float64(14.52), 3: np.float64(15.24), 4: np.float64(0.45)}",,,,
+K-Means,"k=6, n_init=10, max_iter=300",0.2238,31962.18,0.2284,12.0,"{0: np.float64(48.89), 1: np.float64(13.67), 2: np.float64(17.7), 3: np.float64(14.36), 4: np.float64(0.45), 5: np.float64(4.93)}",,,,
+K-Means,"k=10, n_init=10, max_iter=300",0.3076,23921.78,0.2269,11.0,"{0: np.float64(9.7), 1: np.float64(16.5), 2: np.float64(14.67), 3: np.float64(8.01), 4: np.float64(13.67), 5: np.float64(5.99), 6: np.float64(14.69), 7: np.float64(0.45), 8: np.float64(4.93), 9: np.float64(11.41)}",,,,
+Hierarchical,"linkage=ward, k=2, n_sample=1500",0.0666,,0.2989,,"{0: np.float64(86.2), 1: np.float64(13.8)}",,,,
+Hierarchical,"linkage=complete, k=2, n_sample=1500",0.0553,,0.7009,,"{0: np.float64(99.6), 1: np.float64(0.4)}",,,,
+Hierarchical,"linkage=average, k=2, n_sample=1500",0.0603,,0.7009,,"{0: np.float64(99.6), 1: np.float64(0.4)}",,,,
+Hierarchical,"linkage=single, k=2, n_sample=1500",0.038,,0.7009,,"{0: np.float64(99.6), 1: np.float64(0.4)}",,,,
+DBSCAN,"Exp1 (optimal): eps=3.5, min_samples=20",1.3204,,0.3335,,,3.0,9.0,0.18,
+DBSCAN,"Exp2 (small eps): eps=1.5, min_samples=20",0.9215,,0.3246,,,22.0,1036.0,21.1,
+DBSCAN,"Exp3 (low minPts): eps=2.5, min_samples=5",1.1144,,0.2989,,,10.0,21.0,0.43,
+DBSCAN,"Exp4 (tight): eps=2.0, min_samples=20",1.021,,0.3017,,,28.0,646.0,13.16,
+DBSCAN,"Exp5 (transition): eps=3.0, min_samples=20",1.1421,,0.2549,,,3.0,87.0,1.77,
+K-Means,"k=2, UNSCALED",0.0597,,,,,,,,pre-processing comparison
